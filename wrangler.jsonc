@@ -1,0 +1,14 @@
+{
+  "name": "3nr1ko",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-10",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "team-hours",
+      "database_id": "682576fe-9bc5-490a-b867-6c9cd8b99fa9",
+      "migrations_dir": "drizzle"
+    }
+  ]
+}
