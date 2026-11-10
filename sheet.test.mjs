@@ -1,0 +1,35 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import worker from './worker.mjs';
+import {database} from './server.mjs';
+test('weekly/monthly atomic writes, conflict protection and project removal',async()=>{
+ const DB=database(),env={DB,SETUP_TOKEN:'test'};let cookie='';
+ async function call(path,body,method=body?'POST':'GET'){const r=await worker.fetch(new Request('https://test/api/'+path,{method,headers:{origin:'https://test','content-type':'application/json',cookie},...(body?{body:JSON.stringify(body)}:{})}),env);if(r.headers.get('set-cookie'))cookie=r.headers.get('set-cookie').split(';')[0];return {status:r.status,data:await r.json()}}
+ await call('setup',{name:'Admin',pin:'123456',token:'test'});const admin=(await call('public')).data.people[0];await call('login',{id:admin.id,pin:'123456'});const adminCookie=cookie;
+ await call('people',{name:'Member',role:'member',pin:'654321'});const member=(await call('people')).data.find(p=>p.role==='member');
+ await call('projects',{name:'A'});await call('projects',{name:'B'});const [a,b]=(await call('projects')).data;
+ await call('login',{id:member.id,pin:'654321'});const memberCookie=cookie;
+ const day='2026-11-10';const cell=(p,minutes,stamp='',d=day)=>({project:p.id,minutes,stamp,day:d});
+ assert.equal((await call('sheet',{person:admin.id,cells:[cell(a,60)]})).status,403);
+ assert.equal((await call('sheet',{cells:[cell(a,600),cell(b,660)]})).status,200);
+ const list='entries?from=2026-11-01&to=2026-11-30';let rows=(await call(list)).data;assert.equal(rows.reduce((s,e)=>s+e.minutes,0),1260);
+ const stamp=p=>rows.filter(e=>e.project===p.id&&e.day===day).sort((a,b)=>a.id.localeCompare(b.id)).map(e=>e.id+':'+e.updated).join('|');
+ const stale=stamp(a);
+ assert.equal((await call('sheet',{cells:[cell(a,900,stamp(a)),cell(b,600,stamp(b))]})).status,400);
+ assert.equal((await call(list)).data.reduce((s,e)=>s+e.minutes,0),1260);
+ assert.equal((await call('sheet',{cells:[cell(a,660,stamp(a)),cell(b,600,stamp(b))]})).status,200);
+ assert.equal((await call('sheet',{cells:[cell(a,60,stale)]})).status,409);
+ assert.equal((await call('sheet',{cells:[cell(a,1,'','2026-02-30')]})).status,400);
+ assert.equal((await call('sheet',{cells:[cell(a,1.5,'','2026-11-11')]})).status,400);
+ assert.equal((await call('sheet',{cells:[cell(a,60,'','2026-11-11'),cell(a,120,'','2026-11-11')]})).status,400);
+ const month=Array.from({length:30},(_,i)=>cell(a,60,'','2026-12-'+String(i+1).padStart(2,'0')));
+ assert.equal((await call('sheet',{cells:month})).status,200);
+ assert.equal((await call('entries?from=2026-12-01&to=2026-12-31')).data.length,30);
+ assert.equal((await call('projects',{id:a.id},'DELETE')).status,403);
+ cookie=adminCookie;assert.equal((await call('projects',{id:a.id},'DELETE')).data.archived,true);
+ cookie=memberCookie;assert.equal((await call('sheet',{cells:[cell(a,60,'','2026-12-31')]})).status,400);
+ cookie=adminCookie;await call('projects',{name:'Unused'});const unused=(await call('projects')).data.find(p=>p.name==='Unused');assert.equal((await call('projects',{id:unused.id},'DELETE')).data.archived,false);
+ assert.equal((await call(list)).data.length,2);
+ assert.equal((await DB.prepare('SELECT COUNT(*) n FROM write_guards').first()).n,0);
+ DB.close();
+});
